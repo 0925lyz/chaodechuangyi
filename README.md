@@ -1,76 +1,78 @@
-# JaguarTV Prematch Video Factory
+# 朝的创意
 
-Standalone, auditable production repository for `任务1赛前预测视频`. It consolidates the current
-working Task 1 implementations while keeping the existing `Video-creation-automation` repository
-untouched.
+JaguarTV 的赛前静态海报工厂。它只产生 2048x2560 PNG 海报，不生成视频、不拼接视频、不上传视频。
 
-## What is included
+每天的流程故意分成两段：机器先按现有赛前规则推荐赛事，你人工确认具体比赛后，才允许研究、生成和拼接海报。
 
-- Tomorrow-fixture collection in Horário de Brasília.
-- Featured-match selection with current Brazilian-player membership gating.
-- Current-task text routing with an optional explicitly configured provider/model fallback.
-- Independent primary/fallback Image2 configuration.
-- Dreamina/Jimeng VIP Seedance video generation with an explicit APIMart
-  `wan2.6-i2v-flash` 720p/4s fallback.
-- Image2 produces a clean background; exact text, channel icons, and the original Figure 1 logo are
-  composited into a 2048x2560 PNG and saved as a locked foreground layer.
-- Exactly half of each poster batch is selected deterministically for a background-only 4-second
-  motion hook. Every unselected poster uses a local static 4-second hook. Two consecutive operation-class
-  videos and the selected motion CTA then play in full, so final duration is content-driven.
-- Repository-local operation, CTA, music, and CTA-voice inventories are discovered by media type and
-  rotated independently through `runtime/media-rotation.json`; positions advance only after validation.
-- Tests for timezone, selection rules, and provider/model rejection.
-- Prompt contracts and a research-evidence schema that fail closed on uncertain player assets.
-- Real-player face-off poster background method and text-overlay rules: see [docs/poster-master-prompt.md](docs/poster-master-prompt.md) and [docs/poster-production-rules.md](docs/poster-production-rules.md).
-- Canonical Task 1 operator workflow: see [docs/task1-prematch-workflow.md](docs/task1-prematch-workflow.md).
-
-The repository contains no API keys, cookies, tokens, or account-session files. Copy
-`config/prematch.example.json` to the ignored `config/local.json` and provide secrets through the
-named environment variables or macOS Keychain entries.
-
-## Setup
+## 一次配置
 
 ```bash
+cd /Users/jaguar/Documents/ChatGPT/朝的创意
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
 cp config/prematch.example.json config/local.json
 ```
 
-Verify text routing and collect tomorrow's fixtures:
+在 `config/local.json` 对应的环境变量或 macOS Keychain 中配置赛事源、API-Football 和 Image2 凭据。配置文件不放密钥。
 
-```bash
-jaguartv-prematch preflight --config config/local.json
-jaguartv-prematch collect --config config/local.json --output runs/manual/phase1
-```
+## 每日实际操作
 
-Run the complete Task 1 workflow through the canonical WorkBuddy/Codex entrypoint. Use
-`--dry-run` only for local pipeline verification; production mode still stops when current
-research evidence or external integrations are unavailable.
+1. 每日推荐。这个动作只写候选清单，绝不会做图：
 
 ```bash
 scripts/task1_launcher.sh 1
-scripts/task1_launcher.sh 2
-scripts/task1_launcher.sh 3
-scripts/task1_launcher.sh 1 --date today
-scripts/task1_launcher.sh 1 --dry-run --fixtures-file examples/manual-fixtures.example.json
-scripts/task1_launcher.sh 3 --skip-collect   # force a third same-day version from existing phase1/phase2
 ```
 
-`jaguartv-prematch phase1` ... `phase5` remains available for debugging individual phases, but
-daily production should not call `jaguartv-prematch run` directly because it bypasses the batch
-style rotation, Lark sample exclusion, and Desktop delivery rules.
+候选清单在 `runs/YYYYMMDD_batch1/phase1/recommended-fixtures.json`。每一条都有 `fixture_id`、开球时间和推荐原因。
 
-See [docs/architecture.md](docs/architecture.md) for pipeline boundaries and provenance.
+2. 人工挑选。直接写入要做的场次：
 
-## Production gates
+```bash
+jaguartv-prematch select \
+  --run-dir runs/YYYYMMDD_batch1 \
+  --fixture-id fixture-a \
+  --fixture-id fixture-b \
+  --operator "JaguarTV"
+```
 
-Run `preflight` before every production date. A blocked image route or unavailable research
-backend is a stop condition, not permission to generate placeholders. Production runs retain the
-fixture payload, research evidence, prompt, provider route records, image QA, video task ID,
-component filenames and cycle positions, captions, build manifest, upload ID, and server verification result under one
-date-scoped run directory.
+也可以复制 [examples/selection-decisions.example.json](examples/selection-decisions.example.json)，填好后执行：
 
-TikTok drafts use a short Brazilian Portuguese matchup hook, prediction and CTA, with exactly five
-compact relevant hashtags. `#jaguartv` and `#iptv` remain mandatory. The caption manifest marks the
-commercial-content disclosure and applicable AI-generated-content label as required at publication.
+```bash
+jaguartv-prematch select \
+  --run-dir runs/YYYYMMDD_batch1 \
+  --decisions examples/selection-decisions.example.json
+```
+
+`poster_styles` 可写 `fan_crowd`、`star_faceoff` 或 `auto`。`fan_crowd` 是以两队球迷、看台、旗帜和现场情绪为主；`star_faceoff` 是两队各一名已授权球星的正脸对峙。`auto` 会优先交替风格，但只有研究证据完整才会选择球星对峙。
+
+3. 生产静态海报：
+
+```bash
+scripts/task1_launcher.sh 1 --stage produce --date YYYYMMDD
+```
+
+生产会依次核对研究证据、官方队徽、Image2 主/备路由，接着生成无文字背景，再把队徽、赛程、预测、频道图标和精确 JaguarTV Logo 拼成成品。最终 PNG 在 `deliveries/YYYYMMDD_batch1/`，完整记录在同名 `runs/` 目录。
+
+## 本地演练
+
+下列命令不调用赛事源或 Image2，可走完整的“推荐 → 人工选择 → 静态海报交付”路径：
+
+```bash
+jaguartv-prematch recommend \
+  --config config/prematch.example.json \
+  --run-dir runs/demo_batch1 \
+  --fixtures-file examples/manual-fixtures.example.json \
+  --date 20260906
+
+jaguartv-prematch select \
+  --run-dir runs/demo_batch1 \
+  --fixture-id manual-20260906-santos-internacional
+
+jaguartv-prematch produce \
+  --config config/prematch.example.json \
+  --run-dir runs/demo_batch1 \
+  --dry-run
+```
+
+正式生产不用 `--dry-run`。如果球星对峙没有两队当前且授权的球员资料，流程会阻止强制球星海报；改为 `fan_crowd`，或补齐研究证据后重试。

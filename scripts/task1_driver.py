@@ -75,6 +75,10 @@ from jaguartv_prematch.pipeline import (  # noqa: E402
     _upload_metadata,
     _yyMMdd,
     _zh,
+    run_phase1,
+    run_phase2,
+    run_phase3,
+    run_phase4,
 )
 from jaguartv_prematch.poster import compose_poster, prepare_background, resolve_fixture_crests  # noqa: E402
 from jaguartv_prematch.upload import UploadError, upload_pending_review  # noqa: E402
@@ -1013,18 +1017,16 @@ def _lark_sample(run_dir: Path, captions: dict, dry_run: bool, task_id: str | No
 
 # --------------------------------------------------------------------------------------
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="朝的创意 static pre-match poster driver")
     ap.add_argument("--repo", type=Path, default=REPO)
     ap.add_argument("--config", type=Path, default=REPO / "config" / "local.json")
     ap.add_argument("--batch", default="auto", help="auto or a positive batch number")
     ap.add_argument("--date", help="today, tomorrow, YYYY-MM-DD, or YYYYMMDD (default: tomorrow BRT)")
+    ap.add_argument("--stage", choices=("recommend", "produce"), default="recommend")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--research-dir", type=Path, default=None)
-    ap.add_argument("--skip-collect", action="store_true", help="reuse existing phase1 if present")
     ap.add_argument("--fixtures-file", type=Path, default=None,
                    help="use a local fixtures JSON instead of live collect (resilience fallback)")
-    ap.add_argument("--lark-only", action="store_true",
-                    help="skip phases 1-5; re-send the existing phase4 video+caption to Lark (validation)")
     args = ap.parse_args()
 
     date = _target_yyyymmdd(args.date)
@@ -1039,67 +1041,32 @@ def main() -> int:
             raise RuntimeError(f"invalid --batch value: {args.batch}; expected auto or a positive integer")
     run_dir = REPO / "runs" / f"{date}_batch{batch}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[info] batch={batch} date={date} run_dir={run_dir} dry_run={args.dry_run}", flush=True)
-
-    _sync_repo()
-
-    if args.lark_only:
-        cap_path = run_dir / "phase4" / "captions.json"
-        if not cap_path.is_file():
-            print(f"[error] no captions.json at {cap_path}; run a full (non --lark-only) batch first", flush=True)
-            return 2
-        p4 = _read_json(run_dir / "phase4" / "build-manifest.json")
-        lark = _lark_sample(run_dir, _read_json(cap_path), args.dry_run, _select_lark_task_id(p4), force=True)
-        print(json.dumps({"batch": batch, "date": date, "lark_sample": lark}, ensure_ascii=False, indent=2), flush=True)
-        return 0
+    print(f"[info] stage={args.stage} batch={batch} date={date} run_dir={run_dir} dry_run={args.dry_run}", flush=True)
 
     config = FactoryConfig.load(args.config)
-
-    # 1-2. collect + research are daily-reusable. Later differentiated batches reuse the
-    # earliest same-day phase1/phase2 instead of re-collecting.
-    reused_daily = False
-    if batch > 1:
-        for previous in range(1, batch):
-            previous_dir = REPO / "runs" / f"{date}_batch{previous}"
-            if (previous_dir / "phase1" / "selected-fixtures.json").is_file():
-                shutil.copytree(previous_dir / "phase1", run_dir / "phase1", dirs_exist_ok=True)
-                if (previous_dir / "phase2").is_dir():
-                    shutil.copytree(previous_dir / "phase2", run_dir / "phase2", dirs_exist_ok=True)
-                reused_daily = True
-                print(f"[info] batch{batch}: reusing batch{previous} phase1+phase2 (daily steps identical)", flush=True)
-                break
-    _phase1(config, run_dir, args.dry_run, args.skip_collect or reused_daily, args.fixtures_file)
-    _phase2(run_dir, args.dry_run, args.research_dir)
-
-    # 3. style selection + posters (same-day batches must use different styles)
-    hist = _load_history()
-    sel = _select_style(hist, batch, date)
-    style = sel["selected_style"]
-    style_scene = _STYLE_SCENE.get(style, "Vertical 9:16 clean floodlit stadium at night, dark green and gold cinematic colour palette.")
-    _write_json(run_dir / "phase3" / "style-selection.json", sel)
-    print(f"[info] selected style={style} (batch{batch})", flush=True)
-    _phase3(config, run_dir, style, style_scene, args.dry_run)
-
-    # 4. video (batch-specific rotation + captions)
-    date_seed = f"{date}-B{batch}"
-    p4 = _phase4(config, run_dir, batch, date_seed, args.dry_run)
-    if not args.dry_run:
-        _commit_style(hist, style, hist.get("max_recent_styles", 3))
-
-    # 5. lark sample first; then exclude it from server upload and desktop delivery.
-    captions = _read_json(run_dir / "phase4" / "captions.json")
-    lark_task_id = _select_lark_task_id(p4)
-    lark = _lark_sample(run_dir, captions, args.dry_run, lark_task_id)
-    exclude = {lark_task_id} if lark_task_id else set()
-    p5 = _phase5(config, run_dir, args.dry_run, exclude)
-    delivered = _deliver(run_dir, batch, captions, exclude)
-
-    summary = {
-        "batch": batch, "date": date, "run_dir": str(run_dir), "style": style,
-        "poster_count": p4.get("poster_count") or len(p4.get("items", [])),
-        "video_count": p4.get("video_count", 0),
-        "upload": p5.get("status"), "delivered": delivered, "lark_sample": lark,
-    }
+    if args.stage == "recommend":
+        result = run_phase1(config, run_dir, args.fixtures_file, date)
+        summary = {
+            "batch": batch,
+            "date": date,
+            "run_dir": str(run_dir),
+            "status": "WAITING_FOR_MANUAL_SELECTION",
+            "recommendation": result,
+            "next_action": "Review phase1/recommended-fixtures.json, run jaguartv-prematch select, then rerun with --stage produce.",
+        }
+    else:
+        phase2 = run_phase2(run_dir, dry_run=args.dry_run, research_dir=args.research_dir)
+        phase3 = run_phase3(config, run_dir, dry_run=args.dry_run)
+        phase4 = run_phase4(config, run_dir, dry_run=args.dry_run)
+        summary = {
+            "batch": batch,
+            "date": date,
+            "run_dir": str(run_dir),
+            "status": "STATIC_DELIVERY_COMPLETE",
+            "research": phase2,
+            "posters": phase3,
+            "delivery": phase4,
+        }
     _write_json(run_dir / "automation-summary.json", summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
     return 0

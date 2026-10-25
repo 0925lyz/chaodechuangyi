@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,29 +16,8 @@ from .collector import FixtureCollectionError, collect_fixtures, load_fixture_fi
 from .competition import membership_from_fixtures
 from .config import FactoryConfig
 from .image2 import generate_image2, save_image_route_manifest
-from .media_inventory import (
-    commit_rotation,
-    discard_stale_pending,
-    discover_inventory,
-    inventory_fingerprint,
-    reserve_rotation,
-)
 from .poster import compose_poster, prepare_background, resolve_fixture_crests
-from .selection import select_fixtures
-from .upload import upload_pending_review
-from .video import (
-    VideoGenerationError,
-    compose_v7,
-    deterministic_motion_plan,
-    download_dreamina_result,
-    generate_apimart_hook,
-    make_exact_hook,
-    make_layered_master,
-    submit_dreamina_hook,
-    validate_av_duration,
-    validate_layered_hook,
-    video_filenames,
-)
+from .selection import recommend_fixtures
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -113,59 +93,139 @@ TEAM_ZH = {
 
 
 def run_phase1(config: FactoryConfig, run_dir: Path, fixtures_file: Path | None = None, target_date: str | None = None) -> dict[str, Any]:
+    """Collect and rank candidates. This phase never starts poster production."""
     collector = config.data["collector"]
     api_key = config.env_value(collector, "api_key_env", required=False)
-    source = "collector"
-    try:
-        fixtures, raw = collect_fixtures(
-            collector["base_url"],
-            api_key=api_key,
-            date=target_date or "tomorrow",
-            timeout_seconds=int(collector.get("timeout_seconds", 30)),
-        )
-    except FixtureCollectionError as error:
-        if not fixtures_file:
+    if fixtures_file:
+        fixtures, raw = load_fixture_file(fixtures_file)
+        source = "manual_fixture_file"
+    else:
+        source = "collector"
+        try:
+            fixtures, raw = collect_fixtures(
+                collector["base_url"],
+                api_key=api_key,
+                date=target_date or "tomorrow",
+                timeout_seconds=int(collector.get("timeout_seconds", 30)),
+            )
+        except FixtureCollectionError as error:
             raise RuntimeError(
                 "Phase 1 blocked: fixture collector has no usable data and no --fixtures-file was provided; "
                 f"{error}"
             ) from error
-        fixtures, raw = load_fixture_file(fixtures_file)
-        source = "manual_fixture_file"
-        raw["collector_error"] = str(error)
 
     phase_dir = run_dir / "phase1"
     save_collection(fixtures, raw, phase_dir / "fixtures.json")
-    target_iso = fixtures[0].schedule_date if fixtures else resolve_target_date(target_date or "tomorrow")
+    target_iso = resolve_target_date(target_date or "tomorrow")
+    wrong_dates = sorted({fixture.schedule_date for fixture in fixtures if fixture.schedule_date != target_iso})
+    if wrong_dates:
+        raise RuntimeError(
+            f"Phase 1 blocked: fixture data does not match requested date {target_iso}: {', '.join(wrong_dates)}"
+        )
     target_year = datetime.fromisoformat(target_iso).year
     api_config = config.data.get("api_football") or {}
     membership = membership_from_fixtures(target_year, fixtures)
     if api_config:
-        api_key = config.env_value(
-            api_config, "api_key_env", required=bool(api_config.get("required", False))
-        )
-        fetched = load_brasileirao_membership(
-            season=target_year,
-            cache_path=phase_dir / "brasileirao-membership.json",
-            api_key=api_key,
-            endpoint=str(api_config.get("teams_endpoint") or "https://v3.football.api-sports.io/teams"),
-            timeout=int(api_config.get("timeout_seconds", 30)),
-        )
-        if fetched.team_names:
-            membership = fetched
+        api_key = config.env_value(api_config, "api_key_env", required=False)
+        if not api_key and api_config.get("required", False) and source != "manual_fixture_file":
+            raise RuntimeError("Phase 1 blocked: API-Football credentials are required for a live daily recommendation.")
+        if api_key:
+            fetched = load_brasileirao_membership(
+                season=target_year,
+                cache_path=phase_dir / "brasileirao-membership.json",
+                api_key=api_key,
+                endpoint=str(api_config.get("teams_endpoint") or "https://v3.football.api-sports.io/teams"),
+                timeout=int(api_config.get("timeout_seconds", 30)),
+            )
+            if fetched.team_names:
+                membership = fetched
     _write_json(phase_dir / "brasileirao-membership.json", membership.to_dict())
-    selected = {
+    recommendations = {
         "date": target_iso,
         "timezone_label": "Horário de Brasília",
         "source": source,
         "brasileirao_membership": membership.to_dict(),
-        "fixtures": select_fixtures(fixtures, membership),
+        "fixtures": recommend_fixtures(fixtures, membership),
+        "next_action": "Use jaguartv-prematch select with one or more recommended fixture IDs before producing posters.",
     }
-    _write_json(phase_dir / "selected-fixtures.json", selected)
-    return {"ok": True, "source": source, "collected": len(fixtures), "selected": len(selected["fixtures"])}
+    _write_json(phase_dir / "recommended-fixtures.json", recommendations)
+    return {
+        "ok": True,
+        "status": "MANUAL_SELECTION_REQUIRED",
+        "source": source,
+        "collected": len(fixtures),
+        "recommended": len(recommendations["fixtures"]),
+        "recommendations": str(phase_dir / "recommended-fixtures.json"),
+    }
+
+
+def run_manual_selection(
+    run_dir: Path,
+    fixture_ids: list[str],
+    *,
+    poster_styles: dict[str, str] | None = None,
+    operator: str = "",
+    note: str = "",
+) -> dict[str, Any]:
+    """Persist the operator-approved slate, rejecting any non-recommended fixture."""
+    recommendation_path = run_dir / "phase1" / "recommended-fixtures.json"
+    if not recommendation_path.is_file():
+        raise RuntimeError("Manual selection blocked: run the daily recommendation phase first.")
+    recommendations = _read_json(recommendation_path)
+    available = {
+        str(item.get("fixture_id")): item
+        for item in recommendations.get("fixtures", [])
+        if str(item.get("fixture_id") or "").strip()
+    }
+    chosen_ids = [str(item).strip() for item in fixture_ids if str(item).strip()]
+    if not chosen_ids:
+        raise RuntimeError("Manual selection blocked: choose at least one recommended fixture ID.")
+    if len(set(chosen_ids)) != len(chosen_ids):
+        raise RuntimeError("Manual selection blocked: duplicate fixture IDs are not allowed.")
+    unknown = [fixture_id for fixture_id in chosen_ids if fixture_id not in available]
+    if unknown:
+        raise RuntimeError(f"Manual selection blocked: fixture IDs are not in today's recommendation list: {', '.join(unknown)}")
+
+    allowed_styles = {"auto", "fan_crowd", "star_faceoff"}
+    styles = poster_styles or {}
+    invalid_styles = {fixture_id: style for fixture_id, style in styles.items() if style not in allowed_styles}
+    if invalid_styles:
+        raise RuntimeError(f"Manual selection blocked: unsupported poster styles: {invalid_styles}")
+    unknown_style_ids = sorted(set(styles) - set(chosen_ids))
+    if unknown_style_ids:
+        raise RuntimeError(f"Manual selection blocked: poster style supplied for an unselected fixture: {', '.join(unknown_style_ids)}")
+
+    selected = []
+    for fixture_id in chosen_ids:
+        fixture = dict(available[fixture_id])
+        fixture["poster_style"] = styles.get(fixture_id, "auto")
+        selected.append(fixture)
+    payload = {
+        "schema_version": "jaguartv-prematch-selection-v1",
+        "date": recommendations.get("date"),
+        "timezone_label": recommendations.get("timezone_label", "Horário de Brasília"),
+        "operator": operator.strip(),
+        "note": note.strip(),
+        "selection_source": "manual_operator_selection",
+        "fixtures": selected,
+    }
+    phase_dir = run_dir / "phase1"
+    _write_json(phase_dir / "selected-fixtures.json", payload)
+    _write_json(phase_dir / "selection-summary.json", {
+        "ok": True,
+        "status": "SELECTION_CONFIRMED",
+        "selected_count": len(selected),
+        "fixture_ids": chosen_ids,
+        "styles": {fixture["fixture_id"]: fixture["poster_style"] for fixture in selected},
+    })
+    return {"ok": True, "status": "SELECTION_CONFIRMED", "selected": len(selected), "fixture_ids": chosen_ids}
 
 
 def run_phase2(run_dir: Path, *, dry_run: bool = False, research_dir: Path | None = None) -> dict[str, Any]:
-    selected = _read_json(run_dir / "phase1" / "selected-fixtures.json")
+    selected_path = run_dir / "phase1" / "selected-fixtures.json"
+    if not selected_path.is_file():
+        raise RuntimeError("Phase 2 blocked: no manual selection exists. Review recommended-fixtures.json, then run select.")
+    selected = _read_json(selected_path)
     fixtures = selected.get("fixtures", [])
     phase_dir = run_dir / "phase2"
     phase_dir.mkdir(parents=True, exist_ok=True)
@@ -192,14 +252,20 @@ def run_phase2(run_dir: Path, *, dry_run: bool = False, research_dir: Path | Non
                 f"Phase 2 blocked: missing current research evidence for fixture {fixture_id}; "
                 "provide --research-dir or rerun with --dry-run for a local bridge test"
             )
-        records.append({"fixture_id": fixture_id, "path": str((phase_dir / f"{fixture_id}_research.json").resolve()), "dry_run": dry_run})
+        destination = phase_dir / f"{fixture_id}_research.json"
+        if existing != destination:
+            shutil.copy2(existing, destination)
+        records.append({"fixture_id": fixture_id, "path": str(destination.resolve()), "dry_run": dry_run})
     manifest = {"ok": True, "status": "PHASE2_COMPLETE", "research_count": len(records), "records": records}
     _write_json(phase_dir / "research-manifest.json", manifest)
     return manifest
 
 
 def run_phase3(config: FactoryConfig, run_dir: Path, *, dry_run: bool = False) -> dict[str, Any]:
-    selected = _read_json(run_dir / "phase1" / "selected-fixtures.json")
+    selected_path = run_dir / "phase1" / "selected-fixtures.json"
+    if not selected_path.is_file():
+        raise RuntimeError("Phase 3 blocked: no manual selection exists. Do not generate posters from recommendations.")
+    selected = _read_json(selected_path)
     fixtures = selected.get("fixtures", [])
     phase_dir = run_dir / "phase3"
     if not fixtures:
@@ -207,8 +273,7 @@ def run_phase3(config: FactoryConfig, run_dir: Path, *, dry_run: bool = False) -
         _write_json(phase_dir / "poster-manifest.json", report)
         return report
 
-    tasks = [_single_prompt_task(item, run_dir) for item in fixtures]
-    tasks.extend(_schedule_prompt_tasks(fixtures))
+    tasks = [_single_prompt_task(item, run_dir, position=index, dry_run=dry_run) for index, item in enumerate(fixtures)]
     crest_paths = resolve_fixture_crests(fixtures, phase_dir / "crests", required=not dry_run)
     items = []
     for task in tasks:
@@ -227,7 +292,7 @@ def run_phase3(config: FactoryConfig, run_dir: Path, *, dry_run: bool = False) -
             save_image_route_manifest(phase_dir / "image-routes" / f"{task['id']}.json", attempts)
             route = [item.__dict__ for item in attempts]
         prepare_background(raw_path, background_path)
-        task_fixtures = task["fixtures"] if task["kind"] == "schedule" else [next(item for item in fixtures if _task_id(item) == task["id"])]
+        task_fixtures = [next(item for item in fixtures if _task_id(item) == task["id"])]
         compose_meta = compose_poster(
             background_path, poster_path, foreground_path, kind=task["kind"],
             fixtures=task_fixtures,
@@ -240,6 +305,8 @@ def run_phase3(config: FactoryConfig, run_dir: Path, *, dry_run: bool = False) -
         items.append({
             "task_id": task["id"],
             "kind": task["kind"],
+            "poster_style": task["poster_style"],
+            "style_evidence": task["style_evidence"],
             "prompt": str(prompt_path),
             "raw_background": str(raw_path),
             "background": str(background_path),
@@ -254,173 +321,61 @@ def run_phase3(config: FactoryConfig, run_dir: Path, *, dry_run: bool = False) -
 
 
 def run_phase4(config: FactoryConfig, run_dir: Path, *, dry_run: bool = False) -> dict[str, Any]:
+    """Deliver validated static PNGs. Video, audio, and upload steps do not exist in this factory."""
     posters = _read_json(run_dir / "phase3" / "poster-manifest.json").get("items", [])
     phase_dir = run_dir / "phase4"
     if not posters:
-        report = {"ok": True, "status": "NO_CONTENT", "video_count": 0}
-        _write_json(phase_dir / "build-manifest.json", report)
+        report = {"ok": True, "status": "NO_CONTENT", "poster_count": 0}
+        _write_json(phase_dir / "static-delivery-manifest.json", report)
         return report
-
-    inventory = discover_inventory(ROOT / "assets")
-    inventory_id = inventory_fingerprint(inventory)
-    rotation_state = ROOT / "runtime" / "media-rotation.json"
-    usage_ids = {
-        item["task_id"]: f"prematch:{run_dir.name}:{item['task_id']}:{inventory_id[:16]}"
-        for item in posters
-    }
-    discard_stale_pending(rotation_state, set(usage_ids.values()))
-    motion_plan = deterministic_motion_plan(
-        [item["task_id"] for item in posters], _run_date(run_dir),
-        allow_generated_motion=bool(config.data["video"].get("generated_motion", True)),
-    )
+    delivery_dir = ROOT / "deliveries" / run_dir.name
     items = []
-    for sequence, item in enumerate(posters, 1):
-        usage_id = usage_ids[item["task_id"]]
-        reservation = reserve_rotation(
-            rotation_state, inventory, usage_id, operation_count=2, fingerprint=inventory_id,
-        )
-        selected = reservation["components"]
-        components = {
-            "operation": selected["operation"][0],
-            "interface": selected["operation"][1],
-            "cta": selected["cta"],
-            "music": selected["music"],
-            "voice": selected["voice"],
+    for sequence, item in enumerate(posters, start=1):
+        source = Path(item["poster"])
+        if not source.is_file():
+            raise RuntimeError(f"Static delivery blocked: poster is missing for {item['task_id']}")
+        with Image.open(source) as poster:
+            canvas = poster.size
+            poster.verify()
+        compose = item.get("compose") or {}
+        qa = {
+            "canvas": list(canvas),
+            "expected_canvas": [2048, 2560],
+            "correct_canvas": canvas == (2048, 2560),
+            "logo_baked_once": bool(compose.get("logo_sha256")),
+            "content_in_bounds": bool(compose.get("all_content_in_bounds")),
+            "crest_text_clearance": bool(compose.get("crest_text_clearance")),
         }
-        poster = Path(item["poster"])
-        names = video_filenames(poster, int(config.data["video"].get("generation_seconds", 4)), sequence)
-        out = phase_dir / names["media_stem"]
-        master = out / names["master"]
-        background_master = out / f"background-{names['master']}"
-        foreground_master = out / f"foreground-{names['master']}"
-        hook = out / names["hook"]
-        final = out / names["final"]
-        cover = out / names["cover"]
-        master_info = make_layered_master(
-            Path(item["background"]), Path(item["foreground"]), master,
-            background_master, foreground_master,
-        )
-        Image.open(master).save(cover, "JPEG", quality=92)
-        motion_prompt = _motion_prompt(item, background_master)
-        motion_path = out / "motion-prompt.txt"
-        motion_path.parent.mkdir(parents=True, exist_ok=True)
-        motion_path.write_text(motion_prompt, encoding="utf-8")
-        selected_for_motion = motion_plan[item["task_id"]]["dynamic"]
-        if not selected_for_motion:
-            raw = None
-            _loop_video(master, hook, 4)
-            generation = {"provider_id": "static-local", "model_id": "none", "task_id": None, "raw_video": None, "status": "not_called"}
-        elif dry_run:
-            raw = out / names["raw_video"]
-            _loop_video(background_master, raw, int(config.data["video"].get("generation_seconds", 4)))
-            generation = {"provider_id": "dry-run", "model_id": "none", "task_id": None, "raw_video": str(raw), "status": "not_called"}
-        else:
-            try:
-                task_id = submit_dreamina_hook(background_master, motion_prompt, config.data["video"])
-                raw = download_dreamina_result(task_id, out, config.data["video"].get("dreamina_command", "dreamina"))
-                generation = {"provider_id": config.data["video"]["provider_id"], "model_id": config.data["video"]["model_id"], "task_id": task_id, "raw_video": str(raw), "status": "ok"}
-            except VideoGenerationError as primary_error:
-                fallback = config.data["video"].get("fallback")
-                if not fallback:
-                    raise
-                raw = out / f"apimart-{names['media_stem']}-4s.mp4"
-                generation = generate_apimart_hook(background_master, motion_prompt, fallback, raw)
-                generation["fallback_from"] = config.data["video"]["provider_id"]
-                generation["attempts"] = [
-                    {"provider_id": config.data["video"]["provider_id"], "model_id": config.data["video"]["model_id"], "status": "failed", "sanitized_error": str(primary_error)[:500]},
-                    {"provider_id": generation["provider_id"], "model_id": generation["model_id"], "status": "ok"},
-                ]
-        if selected_for_motion:
-            assert raw is not None
-            make_exact_hook(master, Path(raw), foreground_master, hook, 4.0)
-        layer_qa = validate_layered_hook(hook, master, foreground_master)
-        if not layer_qa["foreground_stable"]:
-            raise RuntimeError(f"locked foreground changed during hook for {item['task_id']}: {layer_qa}")
-        final_seconds = compose_v7(ROOT, master=master, hook=hook, output=final, components=components)
-        _check_duration(final, final_seconds)
-        av_duration = validate_av_duration(final, final_seconds)
-        completed_item = {
+        if not all(qa.values()):
+            raise RuntimeError(f"Static delivery blocked: poster QA failed for {item['task_id']}: {qa}")
+        destination = delivery_dir / f"{sequence:02d}-{source.name}"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        items.append({
             "task_id": item["task_id"],
-            "generation_scope": "only poster image and 4-second poster hook are generated; all later segments are reused local assets",
-            "sequence": sequence,
-            "generated_seconds": 4,
-            "final_seconds": round(final_seconds, 3),
-            "audio_duration_qa": {**av_duration, "matches_video": abs(av_duration["audio"] - av_duration["video"]) <= 0.12},
-            "middle_segment_policy": "operation-class videos play in full before CTA",
-            "audio_policy": "local authorized music and CTA voice inventory only",
-            "poster": str(poster),
-            "master": str(master),
-            "hook": str(hook),
-            "final": str(final),
-            "cover": str(cover),
-            "cover_source": "full poster master",
-            "motion_prompt": str(motion_path),
-            "master_info": master_info,
-            "background_master": str(background_master),
-            "foreground_master": str(foreground_master),
-            "motion_selection": motion_plan[item["task_id"]],
-            "layer_qa": layer_qa,
-            "components": components,
-            "media_inventory_fingerprint": inventory_id,
-            "asset_rotation": reservation,
-            "video_generation": generation,
-        }
-        items.append(completed_item)
-        _write_json(phase_dir / "build-manifest.json", {"status": "PHASE4_IN_PROGRESS", "items": items})
-        commit_rotation(rotation_state, usage_id)
-        completed_item["asset_rotation"]["committed"] = True
-        _write_json(phase_dir / "build-manifest.json", {"status": "PHASE4_IN_PROGRESS", "items": items})
-    captions = _captions(run_dir, items)
-    _write_json(phase_dir / "captions.json", captions)
+            "poster_style": item["poster_style"],
+            "poster": str(source),
+            "delivered_poster": str(destination),
+            "qa": qa,
+        })
     manifest = {
         "ok": True,
         "status": "PHASE4_COMPLETE",
-        "video_count": len(items),
-        "generation_policy": {
-            "generated": "poster plus 4-second dynamic hook only",
-            "reused": "full operation-class videos and full motion CTA plus music and voice assets from repository inventory",
-            "final_seconds": "dynamic: 4-second hook + full selected operation clips + full selected CTA",
-            "video_filename_rule": "prefix every video base name with 01, 02, 03... in manifest order",
-        },
+        "poster_count": len(items),
+        "delivery_type": "static_png_only",
+        "delivery_dir": str(delivery_dir),
         "items": items,
-        "captions": str(phase_dir / "captions.json"),
     }
-    _write_json(phase_dir / "build-manifest.json", manifest)
+    _write_json(phase_dir / "static-delivery-manifest.json", manifest)
     return manifest
 
 
 def run_phase5(config: FactoryConfig, run_dir: Path, *, dry_run: bool = False) -> dict[str, Any]:
-    videos = _read_json(run_dir / "phase4" / "build-manifest.json").get("items", [])
-    phase_dir = run_dir / "phase5"
-    if dry_run:
-        result = {"ok": True, "status": "DRY_RUN_NOT_UPLOADED", "upload_count": 0, "would_upload": [item["final"] for item in videos]}
-        _write_json(phase_dir / "upload-manifest.json", result)
-        return result
-    publishing = config.data["publishing"]
-    uploads = []
-    for item in videos:
-        metadata = _upload_metadata(run_dir, item)
-        upload = upload_pending_review(
-            Path(item["final"]),
-            metadata,
-            base_url=config.env_value(publishing, "dashboard_url_env"),
-            upload_token=config.env_value(publishing, "upload_token_env"),
-            dashboard_token=config.env_value(publishing, "dashboard_token_env"),
-        )
-        uploads.append({"task_id": item["task_id"], **upload})
-    result = {"ok": True, "status": "PHASE5_COMPLETE", "upload_count": len(uploads), "uploads": uploads}
-    _write_json(phase_dir / "upload-manifest.json", result)
-    return result
+    raise RuntimeError("Phase 5 is retired: 朝的创意 delivers static PNG posters only and never uploads video.")
 
 
 def run_all(config: FactoryConfig, run_dir: Path, *, dry_run: bool = False, fixtures_file: Path | None = None, research_dir: Path | None = None, target_date: str | None = None) -> dict[str, Any]:
-    return {
-        "phase1": run_phase1(config, run_dir, fixtures_file, target_date),
-        "phase2": run_phase2(run_dir, dry_run=dry_run, research_dir=research_dir),
-        "phase3": run_phase3(config, run_dir, dry_run=dry_run),
-        "phase4": run_phase4(config, run_dir, dry_run=dry_run),
-        "phase5": run_phase5(config, run_dir, dry_run=dry_run),
-    }
+    raise RuntimeError("Automatic full runs are disabled. Run recommend, make a manual selection, then run produce.")
 
 
 def default_run_dir(target_date: str | None = None) -> Path:
@@ -451,20 +406,112 @@ def _prediction_block(fixture: dict[str, Any], run_dir: Path) -> dict[str, str]:
     return {"score": score, "probabilities": probabilities, "tactical": tactical}
 
 
-def _single_prompt_task(fixture: dict[str, Any], run_dir: Path) -> dict[str, str]:
+POSTER_STYLES = ("fan_crowd", "star_faceoff")
+
+
+def _club_key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.casefold())
+
+
+def _verified_faceoff_players(fixture: dict[str, Any], run_dir: Path) -> tuple[str | None, str | None]:
+    """Take one licensed, current player identity per club from the research record."""
+    research_path = run_dir / "phase2" / f"{_task_id(fixture)}_research.json"
+    if not research_path.is_file():
+        return None, None
+    try:
+        assets = _read_json(research_path).get("poster_assets", [])
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(assets, list):
+        return None, None
+
+    def player_for(team: str) -> str | None:
+        key = _club_key(team)
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            if _club_key(str(asset.get("club") or "")) != key:
+                continue
+            if not str(asset.get("license_record") or "").strip():
+                continue
+            name = str(asset.get("player_name") or "").strip()
+            if name:
+                return name
+        return None
+
+    return player_for(str(fixture["home_team"])), player_for(str(fixture["away_team"]))
+
+
+def _resolve_poster_style(
+    fixture: dict[str, Any], run_dir: Path, *, position: int, dry_run: bool,
+) -> tuple[str, dict[str, Any]]:
+    requested = str(fixture.get("poster_style") or "auto")
+    if requested not in {"auto", *POSTER_STYLES}:
+        raise RuntimeError(f"Unsupported poster style for {_task_id(fixture)}: {requested}")
+    home_star, away_star = _verified_faceoff_players(fixture, run_dir)
+    eligible_for_faceoff = bool(home_star and away_star)
+    if dry_run and requested == "star_faceoff":
+        home_star = home_star or "an anonymous home-team footballer"
+        away_star = away_star or "an anonymous away-team footballer"
+        eligible_for_faceoff = True
+    if requested == "star_faceoff" and not eligible_for_faceoff:
+        raise RuntimeError(
+            f"Star-faceoff poster blocked for {_task_id(fixture)}: current licensed player evidence is required for both teams."
+        )
+    if requested == "auto":
+        style = "star_faceoff" if position % 2 == 1 and eligible_for_faceoff else "fan_crowd"
+    else:
+        style = requested
+    return style, {
+        "requested_style": requested,
+        "eligible_for_star_faceoff": eligible_for_faceoff,
+        "home_player": home_star if style == "star_faceoff" else None,
+        "away_player": away_star if style == "star_faceoff" else None,
+    }
+
+
+def _single_prompt_task(
+    fixture: dict[str, Any], run_dir: Path, *, position: int, dry_run: bool,
+) -> dict[str, Any]:
     home, away = str(fixture["home_team"]), str(fixture["away_team"])
     match_date = str(fixture["schedule_date"])
     filename = f"{_zh(home)}_vs_{_zh(away)}_{_yyMMdd(match_date)}_海报.png"
-    prompt = (
-        "Create a clean cinematic 4:5 pre-match football background only. "
-        f"Visual context: {home} versus {away}, {fixture['competition']}. "
-        f"Home kit colours: {_colors(home)}. Away kit colours: {_colors(away)}. "
-        "Keep every player head, face, hair and shoulders above y=620/2560 and outside the central factual area "
-        "(x=300..1748, y=820..1450); this area is reserved for two official crests, team names and VS. "
-        "Leave the top 30%, center information band, and bottom 38% visually quiet. Absolutely no readable text, "
-        "digits, typography, UI, panels, logos, crests, channel marks, sponsors, watermarks, or JaguarTV imagery."
+    style, style_evidence = _resolve_poster_style(fixture, run_dir, position=position, dry_run=dry_run)
+    factual_zone = (
+        "Keep all faces, hair and shoulders clear of the central factual area "
+        "(x=300..1748, y=820..1450), which is reserved for official crests, team names and VS. "
+        "Leave the top 30%, central information band, and bottom 38% visually quiet. "
+        "Absolutely no readable text, digits, typography, UI panels, scoreboards, logos, crests, channel marks, "
+        "sponsors, watermarks, or JaguarTV imagery."
     )
-    return {"id": _task_id(fixture), "kind": "single", "filename": filename, "prompt": prompt, "title": f"{home} vs {away}"}
+    if style == "fan_crowd":
+        scene = (
+            "Use a powerful fan-first scene: two dense supporter sections behind the action, with the home supporters "
+            f"on the far LEFT in {home} colours ({_colors(home)}) and away supporters on the far RIGHT in {away} "
+            f"colours ({_colors(away)}). Faces may be atmospheric and non-identifiable; show scarves, flags, stadium "
+            "lights, smoke and real match-day emotion. No footballer portrait may dominate the composition. "
+        )
+    else:
+        scene = (
+            "Use an editorial two-star face-off: exactly one front-facing, waist-up portrait of "
+            f"{style_evidence['home_player']} in the current {home} kit on the far LEFT, and exactly one front-facing, "
+            f"waist-up portrait of {style_evidence['away_player']} in the current {away} kit on the far RIGHT. "
+            "They look toward the camera with determined expressions; no additional player portraits. "
+        )
+    prompt = (
+        "Create a premium cinematic 4:5 pre-match football background only. "
+        f"Visual context: {home} versus {away}, {fixture['competition']}. "
+        f"Poster style: {style}. {scene}{factual_zone}"
+    )
+    return {
+        "id": _task_id(fixture),
+        "kind": "single",
+        "filename": filename,
+        "prompt": prompt,
+        "title": f"{home} vs {away}",
+        "poster_style": style,
+        "style_evidence": style_evidence,
+    }
 
 
 def _schedule_prompt_tasks(fixtures: list[dict[str, Any]]) -> list[dict[str, Any]]:

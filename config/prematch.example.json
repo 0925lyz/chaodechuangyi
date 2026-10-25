@@ -34,28 +34,9 @@
       "keychain_service": "APIMART_API_KEY"
     }
   },
-  "video": {
-    "provider_id": "operator-dreamina-vip",
-    "model_id": "seedance2.0fast_vip",
-    "resolution": "720p",
-    "generation_seconds": 4,
-    "generated_motion": true,
-    "dreamina_command": "dreamina",
-    "fallback": {
-      "provider_id": "apimart",
-      "model_id": "wan2.6-i2v-flash",
-      "base_url": "https://api.apimart.ai/v1",
-      "base_url_env": "APIMART_VIDEO_BASE_URL",
-      "api_key_env": "APIMART_API_KEY",
-      "keychain_service": "APIMART_API_KEY",
-      "resolution": "720p",
-      "generation_seconds": 4
-    }
-  },
-  "publishing": {
-    "inventory_label": "赛前预测",
-    "dashboard_url_env": "JAGUARTV_DASHBOARD_URL",
-    "upload_token_env": "JAGUARTV_UPLOAD_TOKEN",
-    "dashboard_token_env": "JAGUARTV_DASHBOARD_TOKEN"
+  "poster": {
+    "canvas": "2048x2560",
+    "delivery_dir": "deliveries",
+    "styles": ["fan_crowd", "star_faceoff"]
   }
 }

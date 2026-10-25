@@ -3,9 +3,9 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "jaguartv-prematch-video-factory"
+name = "jaguartv-prematch-static-poster-factory"
 version = "0.1.0"
-description = "Auditable JaguarTV pre-match poster and video production pipeline"
+description = "Auditable JaguarTV pre-match static poster production pipeline"
 requires-python = ">=3.11"
 dependencies = ["Pillow>=10", "requests>=2.32"]
 

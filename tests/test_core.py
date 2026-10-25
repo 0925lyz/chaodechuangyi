@@ -12,7 +12,16 @@ from jaguartv_prematch.collector import collect_fixtures, resolve_target_date, t
 from jaguartv_prematch.competition import BrasileiraoMembership, competition_kind
 from jaguartv_prematch.config import FactoryConfig
 from jaguartv_prematch.image2 import _download_image_url, _verify_requested_size
-from jaguartv_prematch.pipeline import _caption_for, _hashtags, _predicted_score, _schedule_prompt_tasks, run_phase1, run_phase3
+from jaguartv_prematch.pipeline import (
+    _caption_for,
+    _hashtags,
+    _predicted_score,
+    _schedule_prompt_tasks,
+    run_manual_selection,
+    run_phase1,
+    run_phase3,
+    run_phase4,
+)
 from jaguartv_prematch.poster import _transparent_icon, compose_poster, resolve_fixture_crests
 from jaguartv_prematch.records import Fixture
 from jaguartv_prematch.routing import CodexTextRouter, ProviderRoutingError
@@ -635,10 +644,30 @@ def test_phase1_uses_manual_fixture_file_when_collector_fails(tmp_path):
         "video": {"provider_id": "operator-dreamina-vip", "model_id": "seedance2.0fast_vip"},
         "publishing": {"inventory_label": "赛前预测"},
     })
-    result = run_phase1(config, tmp_path / "run", manual)
-    selected = json.loads((tmp_path / "run" / "phase1" / "selected-fixtures.json").read_text(encoding="utf-8"))
+    result = run_phase1(config, tmp_path / "run", manual, "20260903")
+    recommended = json.loads((tmp_path / "run" / "phase1" / "recommended-fixtures.json").read_text(encoding="utf-8"))
     assert result["source"] == "manual_fixture_file"
-    assert len(selected["fixtures"]) == 1
+    assert result["status"] == "MANUAL_SELECTION_REQUIRED"
+    assert not (tmp_path / "run" / "phase1" / "selected-fixtures.json").exists()
+    assert len(recommended["fixtures"]) == 1
+
+
+def test_manual_selection_accepts_only_recommended_fixtures_and_records_style(tmp_path):
+    phase1 = tmp_path / "run" / "phase1"
+    phase1.mkdir(parents=True)
+    phase1.joinpath("recommended-fixtures.json").write_text(
+        json.dumps({"date": "2026-09-06", "fixtures": [fixture().to_dict()]}), encoding="utf-8"
+    )
+
+    result = run_manual_selection(
+        tmp_path / "run", ["fixture-1"], poster_styles={"fixture-1": "fan_crowd"}, operator="tester"
+    )
+
+    selected = json.loads(phase1.joinpath("selected-fixtures.json").read_text(encoding="utf-8"))
+    assert result["status"] == "SELECTION_CONFIRMED"
+    assert selected["fixtures"][0]["poster_style"] == "fan_crowd"
+    with pytest.raises(RuntimeError, match="not in today's recommendation"):
+        run_manual_selection(tmp_path / "run", ["not-recommended"])
 
 
 def test_phase3_dry_run_creates_4x5_posters(tmp_path):
@@ -656,7 +685,7 @@ def test_phase3_dry_run_creates_4x5_posters(tmp_path):
         "publishing": {"inventory_label": "赛前预测"},
     })
     result = run_phase3(config, tmp_path / "run", dry_run=True)
-    assert result["poster_count"] == 2
+    assert result["poster_count"] == 1
     assert result["items"][0]["compose"]["logo_sha256"]
     assert result["items"][0]["compose"]["all_content_in_bounds"] is True
     from PIL import Image
@@ -666,6 +695,53 @@ def test_phase3_dry_run_creates_4x5_posters(tmp_path):
         assert foreground.size == (2048, 2560)
         assert foreground.mode == "RGBA"
         assert foreground.getchannel("A").getbbox()
+
+
+def test_star_faceoff_uses_one_verified_player_from_each_team(tmp_path):
+    phase1 = tmp_path / "run" / "phase1"
+    phase2 = tmp_path / "run" / "phase2"
+    phase1.mkdir(parents=True)
+    phase2.mkdir(parents=True)
+    fx = fixture(home_team="Santos", away_team="Internacional").to_dict()
+    fx["poster_style"] = "star_faceoff"
+    phase1.joinpath("selected-fixtures.json").write_text(json.dumps({"fixtures": [fx]}), encoding="utf-8")
+    phase2.joinpath("fixture-1_research.json").write_text(json.dumps({"poster_assets": [
+        {"player_name": "Neymar", "club": "Santos", "license_record": "asset-1"},
+        {"player_name": "Alan Patrick", "club": "Internacional", "license_record": "asset-2"},
+    ]}), encoding="utf-8")
+    config = FactoryConfig(Path("test"), {
+        "collector": {"base_url": "http://127.0.0.1:1/api/v1/fixtures"},
+        "text": {"provider_id": "current-task", "primary_model_id": "current-task", "fallback_model_id": "current-task"},
+        "image": {"model_id": "gpt-image-2", "size": "1024x1280", "primary": {}, "fallback": {}},
+    })
+
+    result = run_phase3(config, tmp_path / "run", dry_run=True)
+    prompt = Path(result["items"][0]["prompt"]).read_text(encoding="utf-8")
+
+    assert result["items"][0]["poster_style"] == "star_faceoff"
+    assert "exactly one front-facing" in prompt
+    assert "Neymar" in prompt and "Alan Patrick" in prompt
+
+
+def test_static_delivery_copies_validated_png_without_a_video(tmp_path, monkeypatch):
+    phase1 = tmp_path / "run" / "phase1"
+    phase1.mkdir(parents=True)
+    phase1.joinpath("selected-fixtures.json").write_text(
+        json.dumps({"fixtures": [{"selection_reason": "target_club", **fixture(home_team="Santos", away_team="Internacional").to_dict()}]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    config = FactoryConfig(Path("test"), {
+        "collector": {"base_url": "http://127.0.0.1:1/api/v1/fixtures"},
+        "text": {"provider_id": "current-task", "primary_model_id": "current-task", "fallback_model_id": "current-task"},
+        "image": {"model_id": "gpt-image-2", "size": "1024x1280", "primary": {}, "fallback": {}},
+    })
+    run_phase3(config, tmp_path / "run", dry_run=True)
+    monkeypatch.setattr("jaguartv_prematch.pipeline.ROOT", tmp_path)
+    delivery = run_phase4(config, tmp_path / "run", dry_run=True)
+
+    assert delivery["delivery_type"] == "static_png_only"
+    assert delivery["poster_count"] == 1
+    assert Path(delivery["items"][0]["delivered_poster"]).is_file()
 
 
 def test_production_poster_requires_two_official_crests_and_keeps_names_clear(tmp_path):

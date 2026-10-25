@@ -28,7 +28,7 @@ class FactoryConfig:
 
     @staticmethod
     def _validate(data: dict[str, Any]) -> None:
-        required = ("collector", "text", "image", "video", "publishing")
+        required = ("collector", "text", "image")
         missing = [key for key in required if key not in data]
         if missing:
             raise ConfigurationError(f"Missing configuration sections: {', '.join(missing)}")
@@ -37,9 +37,6 @@ class FactoryConfig:
         if not all(str(text.get(key) or "").strip() for key in ("provider_id", "primary_model_id", "fallback_model_id")):
             raise ConfigurationError("Text provider and model routes must be configured")
 
-        if data["publishing"].get("inventory_label") != "赛前预测":
-            raise ConfigurationError("Publishing inventory label must be exactly 赛前预测")
-
         image = data["image"]
         if image.get("model_id") != "gpt-image-2":
             raise ConfigurationError("Poster generation model must be gpt-image-2")
@@ -47,15 +44,6 @@ class FactoryConfig:
             raise ConfigurationError("The active large-model API must be the primary Image2 route")
         if (image.get("fallback") or {}).get("provider_id") != "apimart":
             raise ConfigurationError("APIMart must remain the explicit secondary Image2 route")
-
-        video = data["video"]
-        if int(video.get("generation_seconds", 0)) != 4:
-            raise ConfigurationError("The generated poster hook must be exactly 4 seconds")
-        fallback = video.get("fallback") or {}
-        if fallback.get("provider_id") != "apimart" or fallback.get("model_id") != "wan2.6-i2v-flash":
-            raise ConfigurationError("Video fallback must be APIMart wan2.6-i2v-flash")
-        if fallback.get("resolution") != "720p" or int(fallback.get("generation_seconds", 0)) != 4:
-            raise ConfigurationError("APIMart video fallback must use 720p and duration 4")
 
     def env_value(self, section: dict[str, Any], field: str, *, required: bool = True) -> str:
         env_name = str(section.get(field))

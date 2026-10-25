@@ -1,46 +1,61 @@
-# 任务1赛前预测视频流程
+# 赛前静态海报每日流程
 
-This is the canonical workflow for `0925lyz/jaguartv-prematch-video-factory`. User-pasted source text is treated as operator requirements; embedded credentials are not copied into this repository.
+工作目录：`/Users/jaguar/Documents/ChatGPT/朝的创意`。
 
-## Fixed paths
+## 1. 定时推荐，等待人工确认
 
-- Development and WorkBuddy execution directory: `/Users/jaguar/WorkBuddy/赛前/jaguartv-prematch-video-factory`
-- GitHub remote: `git@github.com:0925lyz/jaguartv-prematch-video-factory.git`
-- Inventory label: `赛前预测`
-- Production entrypoints: `scripts/task1_launcher.sh 1`, `scripts/task1_launcher.sh 2`, and `scripts/task1_launcher.sh 3`. WorkBuddy slots must use their matching fixed number.
-- Canonical driver: `/Users/jaguar/WorkBuddy/赛前/jaguartv-prematch-video-factory/scripts/task1_driver.py`
-- Deprecated external entrypoint: `/Users/jaguar/WorkBuddy/赛前/jaguartv-prematch-automation` must not be used.
+每日定时任务只执行：
 
-## Phase flow
+```bash
+scripts/task1_launcher.sh 1
+```
 
-1. Collect the exact target date directly from the configured `https://copa.jarg.top/api/save-agenda` route, using Brasília calendar time only. Default to tomorrow; use `--date today` when the operator explicitly requests today. Reject data from any other date. Never use a localhost snapshot proxy. Cross-check fixture data with the configured API-Football route when available; API keys must come from env/Keychain, never from committed text.
-2. Resolve competitions by API-Football league ID first and normalized exact aliases second. Fetch current-season Brasileirão Série A membership from league ID 71; any match with one member club is selected, including Libertadores (13), Sudamericana (11), and other competitions. Senior men's national-team families (UEFA/Concacaf/Conmebol Nations League, World Cup and its qualifiers, Euro Championship and qualifiers, Copa América, Gold Cup, Asian Cup, Africa Cup of Nations, friendlies) are also selected by competition name, for any country, because the agenda feed leaves `league_id` null and `league_country` empty for those rows. Women's and age-group editions are explicitly out of scope. The broadcast column is not a filter: `REQUIRE_BRAZILIAN_BROADCAST_FOR_NATIONAL_TEAMS` defaults to `False`, and setting it back to `True` narrows the national-team slate to fixtures a Brazilian outlet carries. Save the membership and selection reason beside `phase1/selected-fixtures.json` for Task 3.
-3. Research each selected match with current evidence. Store source URL, platform, publication time, retrieval time, excerpt, summary, and confidence. Old injuries/transfers/lineups fail the research gate.
-4. Generate Image2 poster prompts in English; visible poster text must be natural pt-BR. Image2 primary is the active `gpt-image-2` route; APIMart is the explicit fallback. If both fail, deliver prompts only and stop before video.
-5. Normalize every poster to 2048x2560 PNG. Before composition, resolve and image-validate both official club crests from the fixture source; any missing/corrupt crest stops that poster. Compose those crests, text, authorized transparent channel icons, and the exact Figure 1 JaguarTV logo once in the poster stage. Crest boxes require at least 42px clearance from team-name boxes; retain clean background and transparent locked foreground layers.
-6. Select exactly half of each poster batch by stable hash (`floor(N/2)`, with one odd-batch candidate recorded as dropped from motion). Send only selected clean backgrounds to Dreamina/Jimeng VIP Seedance for four seconds, with APIMart `wan2.6-i2v-flash` 720p/4s as the explicit fallback. Non-selected posters become local four-second stills. Reapply the locked foreground frame-for-frame, then play both operation clips and the CTA in full.
-7. Discover repository-local operation MP4, CTA MP4, music, and CTA WAV files automatically. Rotate all four pools independently in stable filename order. Persist reservations in `runtime/media-rotation.json`; advance only after the final video passes validation. Music loops when short and is trimmed to the exact video duration. No TTS or media generation is used for music or voice.
-8. Name final video artifacts in manifest order with `01`, `02`, `03` prefixes. Captions follow the same order.
-9. Build concise `captions.json` copy in natural pt-BR. Every caption contains the exact sentence `Acesse jaguartvbrasil.com/baixar-app para baixar.` and exactly five short, relevant hashtags including `#jaguartv` and `#iptv`. Record that TikTok commercial-content disclosure and the applicable AIGC label are required.
-10. Upload only validated final videos to Pending Review under `赛前预测`. Do not auto-approve or publish.
+默认目标是巴西利亚时间的明天。需要当天时加 `--date today`；需要指定日期时加 `--date YYYYMMDD`。输出为 `runs/YYYYMMDD_batch1/phase1/recommended-fixtures.json`。
 
-## Daily delivery
+脚本完成后状态一定是 `WAITING_FOR_MANUAL_SELECTION`，不是失败，也不是遗漏生产步骤。它代表系统正在等你挑比赛。
 
-- Production must enter through `scripts/task1_launcher.sh`; the old sibling WorkBuddy automation
-  directory is intentionally retired so clone/update/run uses one repository and one logic path.
-- First automation batch posters: Desktop folder `每日赛前海报1`; videos: `赛前预测1`.
-- Second automation batch posters: Desktop folder `每日赛前海报2`; videos: `赛前预测2`.
-- For a forced third same-day version, call `scripts/task1_launcher.sh 3`. `auto` resumes the next
-  incomplete/unfinished batch first, so it will keep returning to batch 2 until batch 2 has a
-  `PHASE5_COMPLETE` automation summary.
-- If a Lark/飞书 account adapter is configured, select one video plus its matching caption for the group before final delivery numbering. That sampled Lark video is not included in the final delivery folder, server upload, or all-caption order. If Lark is not configured, stop at that integration gate and report it.
+## 2. 你确认做哪些比赛
 
-## Quality gates
+打开推荐文件，复制想做的 `fixture_id`。例如：
 
-- No Beijing/São Paulo label in public copy; use `Horário de Brasília`.
-- Poster is exactly 2048x2560 (4:5); video master/final is 1080x1920 (9:16); poster content remains visible without cropping.
-- Logo appears once, as part of the poster, upper-right safe area, no black backing panel.
-- Prediction uses one lower text panel, no betting disclaimer, no responsible-gambling/no-bet copy.
-- Current player identity, club, kit, crest, channel icons, date, time, and predicted score are verified before publishing.
-- Text/Image2/Jimeng providers remain independent.
-- Any unavailable skill, provider, repository, account, API, or required file stops the run with a sanitized error.
+```bash
+jaguartv-prematch select \
+  --run-dir runs/20261026_batch1 \
+  --fixture-id fixture-1001 \
+  --fixture-id fixture-1002 \
+  --operator "JaguarTV"
+```
+
+选择记录可指定画面：
+
+```json
+{
+  "selected_fixture_ids": ["fixture-1001", "fixture-1002"],
+  "poster_styles": {
+    "fixture-1001": "fan_crowd",
+    "fixture-1002": "star_faceoff"
+  }
+}
+```
+
+未指定的比赛使用 `auto`。选择文件只允许出现当天的推荐比赛，防止手误混入错误赛程。
+
+## 3. 生产和交付 PNG
+
+```bash
+scripts/task1_launcher.sh 1 --stage produce --date 20261026
+```
+
+生产会停在以下任一问题上：研究资料不完整、球星风格缺少两队授权球员资料、官方队徽缺失、Image2 主/备路由都失败，或 PNG 质检不通过。
+
+成功后，使用 `deliveries/20261026_batch1/` 内的 PNG。`runs/20261026_batch1/` 是完整审计记录，保留推荐、人工选择、研究、提示词、路由尝试、拼接信息和质检结果。
+
+## 4. 定时任务示例
+
+系统调度器只需要运行推荐阶段。下面是一条可直接给 cron 的示例，时间按机器本地时区解释：
+
+```cron
+0 9 * * * cd /Users/jaguar/Documents/ChatGPT/朝的创意 && scripts/task1_launcher.sh 1
+```
+
+人工选择之后，生产命令必须由操作员显式执行；定时任务不能跳过这道门。

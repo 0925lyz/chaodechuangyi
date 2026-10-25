@@ -9,6 +9,7 @@ config/local.json
 runs/
 runtime/
 delivery/
+deliveries/
 secrets/
 *.log
 .tmp-pytest/

@@ -1,0 +1,11 @@
+{
+  "schema_version": "jaguartv-prematch-selection-v1",
+  "operator": "operator-name",
+  "note": "Selected after reviewing the daily recommendations.",
+  "selected_fixture_ids": [
+    "manual-20260906-santos-internacional"
+  ],
+  "poster_styles": {
+    "manual-20260906-santos-internacional": "fan_crowd"
+  }
+}

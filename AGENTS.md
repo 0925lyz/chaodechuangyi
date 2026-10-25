@@ -1,68 +1,27 @@
-# JaguarTV Prematch Factory Routing
+# 朝的创意 Static Prematch Poster Factory
 
 These rules apply to every task and automation in this repository.
 
-## Text model routing
+## Routing and assets
 
-- Use the large model selected for the current execution task by default.
-- A run may explicitly configure any available text model, including hy3, hy4, DeepSeek, or GPT routes.
-- Do not hard-code stale model names such as `gpt-5.5` or `gpt-5.6-sol` in prompts, scripts, configuration, task creation, or automation prompts.
-- Verify an explicitly configured model before treating it as available.
-- Keep `provider_id` and `model_id` as separate fields in records and manifests.
-- Do not place credentials, tokens, cookies, or account-session files in this repository.
+- Use the large model selected for the current task by default. Do not hard-code obsolete text-model names.
+- Use the configured active `gpt-image-2` route first and the configured APIMart route only as an explicit recorded fallback.
+- The upper-right JaguarTV logo must be the exact Figure 1 asset and must be baked into each final poster exactly once.
+- Image2 creates only the clean 4:5 visual background. The compositor adds the logo, team data, channel icons, official crests, and pt-BR copy deterministically to a 2048x2560 PNG.
+- Every match poster must resolve and validate both official club crests before production. Missing or corrupt crests stop the run.
+- A `star_faceoff` background requires current, licensed research evidence for one player from each team. Without both records, it stops when forced and falls back to `fan_crowd` only when style is `auto`.
+- Player, crest, kit, and channel assets used by this project must be authorized and recorded in the run evidence.
 
-## Media generation
+## Static-only workflow
 
-- Image generation uses the configured active `gpt-image-2` route first and APIMart second.
-- A fallback must be recorded; it must never be silent.
-- The upper-right JaguarTV logo must be baked into the poster itself exactly once. Video compositing must not add a second logo overlay.
-- Image2 generates only the clean 4:5 background. Text, predictions, team information, channel icons,
-  and the exact Figure 1 logo are composited deterministically into a 2048x2560 PNG foreground.
-- Every production match poster and schedule row must contain both verified official club crests. Resolve and
-  validate both crest files before Image2 output is accepted; a missing or corrupt crest is a stop condition,
-  never a reason to publish a crestless design. Keep team names at least 42px from crest boxes and reserve the
-  central factual zone for crests/names while player heads, faces, hair, and shoulders remain above it.
-- Video generation uses the authenticated Dreamina/Jimeng VIP Seedance route first. If it is
-  unavailable, use only the configured APIMart `wan2.6-i2v-flash` fallback at 720p for 4 seconds
-  and record both provider attempts.
-- Select exactly half of each poster batch deterministically for background-only motion; odd batches
-  drop one deterministic motion candidate. Every remaining poster uses a local static 4-second hook.
-  An operator may switch this off machine-locally with `video.generated_motion: false` in the local
-  config: no poster is then sent to a video model, every poster uses the local static 4-second hook,
-  and each record's `motion_selection.reason` becomes `generated_motion_disabled_by_operator`.
-  The default remains on.
-- Generate exactly the opening 4-second poster hook. Play each selected operation-class video
-  and motion CTA in full; the final duration is their actual combined duration, not a fixed 12 seconds.
-  Middle clips, CTA, music, and voiceover must come from existing authorized inventory.
-- Discover the four repository-local media pools automatically and rotate operation, CTA, music,
-  and voice independently. Persist positions and advance them only after final validation. Never
-  call TTS or another generation service for music or CTA voice.
-- Text, image, and video provider selections are independent.
+- This repository produces static PNG posters only. Do not generate video, hooks, audio, TTS, CTA media, or a video upload from this workflow.
+- Daily automation runs `scripts/task1_launcher.sh <1|2|3>` in its default `recommend` stage. It creates recommendations and stops.
+- An operator must review `phase1/recommended-fixtures.json` and run `jaguartv-prematch select` before production. The system must never turn recommendations into posters automatically.
+- After selection, run `scripts/task1_launcher.sh <batch> --stage produce --date YYYYMMDD`. It validates research, generates backgrounds, composites posters, runs PNG QA, and delivers image files locally.
+- Keep `provider_id` and `model_id` as separate fields in records and manifests. Never place credentials, tokens, cookies, or account-session files in the repository.
 
-## Execution entrypoint
+## Publish copy and safety
 
-- Production and WorkBuddy runs must use `scripts/task1_launcher.sh <1|2|3>` from this repository; each WorkBuddy slot owns its matching fixed batch number.
-- The default target is tomorrow in Brasília time. An explicit operator request for today must pass `--date today`; a concrete date must pass `--date YYYYMMDD`. Never substitute another day.
-- Fixture collection must use the configured `https://copa.jarg.top/api/save-agenda` route. Never start, probe, or consume a temporary localhost fixture proxy.
-- `scripts/task1_driver.py` is the only Task 1 batch driver. Do not call or recreate the old sibling
-  `/Users/jaguar/WorkBuddy/赛前/jaguartv-prematch-automation` entrypoint.
-- The package CLI may be used for isolated phase debugging only; daily production must not call
-  `jaguartv-prematch run` directly.
-
-## Publish copy
-
-- Write concise pt-BR copy in a natural Brazilian football voice: matchup hook, editorial prediction,
-  one short tactical point when available, Jaguar TV prompt, and the fixed download sentence.
-- TikTok copy uses exactly five relevant hashtags. Keep `#jaguartv` and `#iptv`; prefer compact team
-  and popular competition tags for the other three. Never slice a long phrase into a meaningless tag.
-- Do not claim `transmissão liberada`, `sem travamentos`, a free trial, or another offer unless that
-  exact claim is verified for the run.
-- TikTok publishing must enable the commercial-content disclosure and the AI-generated-content label
-  when the realistic poster or hook is AI-generated. Caption manifests record both requirements.
-
-## Production safety
-
-- Stop at the first unavailable required integration and report the sanitized error.
-- Do not substitute missing player assets with an unapproved player or a playerless design.
-- Do not upload a file until all media validation checks pass.
-- Upload only to Pending Review under the exact inventory label `赛前预测`.
+- Visible copy is concise, natural pt-BR and contains an editorial prediction only when supported by current research.
+- Do not claim offers, free trials, service quality, or availability that the run has not verified.
+- Stop at the first unavailable required integration and report a sanitized error.

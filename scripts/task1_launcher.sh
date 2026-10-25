@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# JaguarTV Prematch 任务一 — robust launcher for task1_driver.py
+# 朝的创意 — static prematch-poster launcher
 #
 # Wraps the driver with: managed-node PATH (lark-cli), the repo venv python,
 # dated logging, and strict exit-code propagation so the automation can tell
@@ -8,11 +8,10 @@
 # Usage:
 #   task1_launcher.sh <batch:auto|positive-number> [extra driver args...]
 # Examples:
-#   task1_launcher.sh 1                # production batch 1 (live fixture collect)
-#   task1_launcher.sh 2                # production batch 2
-#   task1_launcher.sh 3                # force a third differentiated batch
-#   task1_launcher.sh 1 --dry-run      # preflight smoke test
-#   task1_launcher.sh 1 --fixtures-file /path/to/fixtures.json   # file fallback
+#   task1_launcher.sh 1                # daily recommendation only; waits for manual selection
+#   task1_launcher.sh 1 --stage produce --date 20261026
+#   task1_launcher.sh 1 --dry-run --stage produce --date 20261026
+#   task1_launcher.sh 1 --fixtures-file /path/to/fixtures.json   # local recommendation test
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

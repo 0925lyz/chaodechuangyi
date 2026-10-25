@@ -1,53 +1,45 @@
-# Architecture
+# 静态海报架构
 
-The repository consolidates the reusable work from the three Task 1 implementations and the
-applicable parts of the fixture collector, poster-only, pre-match, and post-match tasks. It does
-not modify or vendor the separate video-creation-automation repository.
+`朝的创意` 是一条可追溯的静态赛前海报链路。它不包含动态生成、音频、视频合成或视频上传。
 
-## Pipeline boundaries
+```text
+赛事源 + API-Football
+        |
+        v
+phase1/recommended-fixtures.json
+        |
+        | 人工确认 fixture_id 和可选风格
+        v
+phase1/selected-fixtures.json
+        |
+        v
+phase2/当前研究证据
+        |
+        v
+Image2 无文字背景 + 官方队徽 + 固定 Logo + pt-BR 信息层
+        |
+        v
+phase3/posters/*.png --> phase4 PNG QA --> deliveries/<run>/
+```
 
-1. `collector.py` reads the configured local tomorrow-fixtures service and stores its raw payload.
-2. `selection.py` identifies API-Football competitions by stable league ID, then controlled
-   normalized aliases. Current-season Brasileirão Série A membership comes from API-Football
-   league/team relations; any fixture with one member club qualifies regardless of competition.
-   National-team competition families qualify by competition name instead, for senior men's
-   teams of any country, since the agenda feed carries no league ID or country for them;
-   women's and age-group editions are excluded, and the broadcast column is not a filter
-   (see `REQUIRE_BRAZILIAN_BROADCAST_FOR_NATIONAL_TEAMS`).
-3. Research records must retain URL, platform, timestamps, excerpt, normalized summary, and
-   confidence before poster generation begins.
-4. Prompt generation uses the current task model unless an available provider/model is explicitly configured. Image generation is a separate
-   primary/fallback route and records the route actually used.
-5. Image2 produces only the photographic background. The deterministic poster compositor writes
-   all text, channel icons, and the exact Figure 1 JaguarTV logo into a 2048x2560 PNG and retains a
-   matching transparent foreground layer. Required assets fail closed.
-6. Exactly `floor(N/2)` poster backgrounds, selected by a stable hash, enter the video model for
-   four seconds. Other posters use a local four-second still. The locked foreground is composited
-   back over every generated background frame.
-   Dreamina/Jimeng VIP Seedance is primary; APIMart `wan2.6-i2v-flash` at 720p/4s is the
-   recorded fallback. The middle section plays the next two operation-class videos in full,
-   followed by the selected motion CTA in full. Final duration is therefore dynamic. Music is
-   looped when necessary and trimmed to the exact video duration; CTA voice is trimmed to the CTA
-   window. Operation, CTA, music, and voice inventories rotate independently and persist under
-   `runtime/media-rotation.json`. A reservation advances only after the final video passes validation.
-7. Upload is a separate final gate. Only validated packages are sent to Pending Review under
-   `赛前预测`; the pipeline never approves or publishes them.
+## 阶段边界
 
-## Reused decisions
+1. `recommend`：按当前的 Brasileirão、目标赛事、目标俱乐部、巴西球员和成年男子国家队规则排列候选比赛。它只写候选清单。
+2. `select`：只接受候选清单内的 `fixture_id`。这一步写入人工决策和单场的 `poster_style`，并解锁后续阶段。
+3. `phase2`：每场必须有当前研究资料。非演练状态不能用占位数据。
+4. `phase3`：Image2 只画没有文字、没有 Logo、没有队徽的 4:5 背景。确定性拼接器生成最后的 2048x2560 PNG。
+5. `phase4`：验证画布、Logo、队徽和内容边界，复制合格 PNG 到 `deliveries/`。
 
-- Daily collector: structured fixture IDs, original source text, complete channel lists, and
-  source freshness fields.
-- Poster-only task: Image2 visual background plus deterministic information overlay and QA.
-- Pre-match tasks: player asset gating, lower prediction box, readable pt-BR copy, and 4:5 output.
-- Post-match task: reusable evidence schema, media validation, CTA audio inventory, and upload
-  verification patterns only. Post-match wording and result semantics are not reused.
-- Operator-supplied local media: operation modules, CTA videos, music, voiceovers, and build-manifest
-  component accounting.
+## 两种画面
 
-## Failure contract
+- `fan_crowd`：两队看台与球迷情绪是画面主角；球员不能成为主视觉。
+- `star_faceoff`：左右各一名已授权、当前效力的球星正脸。研究记录中必须有两队各一条带 `license_record` 的 `poster_assets`；缺一条就不能强制做该风格。
 
-Every failed phase reports the operation, provider or file, sanitized error, attempted checks,
-last verified artifact, and next retry time. Transient APIMart failures persist task/retry state and
-retry with exponential backoff and jitter; deterministic authentication, parameter, safety, and
-asset errors stop with diagnosis. No provider substitution occurs outside the explicitly configured
-chains. Secrets stay outside manifests and logs.
+`auto` 在合格资料足够时交替两种画面，避免每日都像同一张模板。
+
+## 不可绕过的规则
+
+- 没有人工选择，不生成海报。
+- 没有两枚经过验证的官方队徽，不生成海报。
+- Logo 只能使用项目内精确 Figure 1 文件，最终海报仅出现一次。
+- 主 Image2 路由失败时才尝试已配置的 APIMart 备用路由，并将两次尝试写入 manifest。

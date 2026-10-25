@@ -137,3 +137,31 @@ def select_fixtures(
         if reason:
             selected.append({"selection_reason": reason, **fixture.to_dict()})
     return selected
+
+
+_RECOMMENDATION_PRIORITY = {
+    "brasileirao_team": 1,
+    "target_competition": 2,
+    "target_club": 3,
+    "verified_current_brazilian_player": 4,
+    "national_team_competition": 5,
+}
+
+
+def recommend_fixtures(
+    fixtures: list[Fixture], membership: BrasileiraoMembership | None = None
+) -> list[dict[str, object]]:
+    """Return editorial candidates only; an operator must still select the production slate."""
+    candidates = select_fixtures(fixtures, membership)
+    ranked = sorted(
+        candidates,
+        key=lambda item: (
+            _RECOMMENDATION_PRIORITY.get(str(item.get("selection_reason")), 99),
+            str(item.get("kickoff_at_brt") or ""),
+            str(item.get("fixture_id") or ""),
+        ),
+    )
+    return [
+        {"recommendation_rank": index, **fixture}
+        for index, fixture in enumerate(ranked, start=1)
+    ]
