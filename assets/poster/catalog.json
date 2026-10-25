@@ -1,0 +1,19 @@
+{
+  "schema_version": "jaguartv-poster-asset-catalog-v1",
+  "catalog_policy": "Only entries with status=approved, a complete provenance record and a matching SHA-256 may be used in a poster.",
+  "assets": [
+    {
+      "asset_id": "jaguartv-stadium-crowd-20260821",
+      "status": "approved",
+      "kind": "fan_crowd_background",
+      "local_path": "assets/poster/fan-crowd/jaguartv-stadium-crowd-20260821.png",
+      "source_url": "internal://image2-database/outputs/260821_today_image2/Hoje_futebol_260821_image2_base.png",
+      "license_id": "operator-authorized",
+      "license_url": "docs/assets-provenance.md#poster-background-assets",
+      "attribution": "JaguarTV Image2 production asset, operator-authorized for this factory.",
+      "sha256": "a0af19ae802952c652e56d26095285ba0b4827e638cf3d20e1df0c7f3d438495",
+      "approved_at": "2026-10-25",
+      "approval_record": "project operator authorization"
+    }
+  ]
+}

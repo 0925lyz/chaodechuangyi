@@ -243,6 +243,32 @@ def prepare_background(raw: Path, output: Path) -> None:
     image.convert("RGB").save(output, "PNG", optimize=True)
 
 
+def compose_faceoff_background(home_portrait: Path, away_portrait: Path, output: Path) -> None:
+    """Create a static two-player background from the two approved source photos only."""
+    home = ImageOps.exif_transpose(Image.open(home_portrait)).convert("RGB")
+    away = ImageOps.exif_transpose(Image.open(away_portrait)).convert("RGB")
+    home = ImageOps.fit(home, (W // 2 + 190, H), method=Image.Resampling.LANCZOS)
+    away = ImageOps.fit(away, (W // 2 + 190, H), method=Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", (W, H), (5, 10, 18))
+    canvas.paste(home, (0, 0))
+    mask = Image.new("L", away.size)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.rectangle((0, 0, 160, H), fill=0)
+    for x in range(160, 520):
+        mask_draw.line((x, 0, x, H), fill=round(255 * (x - 160) / 360))
+    mask_draw.rectangle((520, 0, away.width, H), fill=255)
+    canvas.paste(away, (W - away.width, 0), mask)
+    shade = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    shade_draw = ImageDraw.Draw(shade)
+    for y in range(H):
+        alpha = max(0, int(135 * (1 - y / 960))) + max(0, int(185 * ((y - 1420) / 1140)))
+        shade_draw.line((0, y, W, y), fill=(0, 4, 10, min(alpha, 210)))
+    result = canvas.convert("RGBA")
+    result.alpha_composite(shade)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    result.convert("RGB").save(output, "PNG", optimize=True)
+
+
 def compose_poster(
     background: Path, output: Path, foreground_output: Path, *, kind: str,
     fixtures: list[dict[str, Any]], predictions: dict[str, dict[str, str]],

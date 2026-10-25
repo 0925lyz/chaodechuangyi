@@ -7,8 +7,10 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
+from PIL import Image
 
 from jaguartv_prematch.collector import collect_fixtures, resolve_target_date, tomorrow_brasilia
+from jaguartv_prematch.assets import choose_fan_background, discover_assets, sha256_file, verified_player_asset
 from jaguartv_prematch.competition import BrasileiraoMembership, competition_kind
 from jaguartv_prematch.config import FactoryConfig
 from jaguartv_prematch.image2 import _download_image_url, _verify_requested_size
@@ -721,6 +723,53 @@ def test_star_faceoff_uses_one_verified_player_from_each_team(tmp_path):
     assert result["items"][0]["poster_style"] == "star_faceoff"
     assert "exactly one front-facing" in prompt
     assert "Neymar" in prompt and "Alan Patrick" in prompt
+
+
+def test_approved_fan_catalog_requires_a_matching_hash(tmp_path):
+    image = tmp_path / "assets" / "poster" / "fan-crowd" / "crowd.png"
+    image.parent.mkdir(parents=True)
+    Image.new("RGB", (32, 32), "green").save(image)
+    catalog = image.parents[1] / "catalog.json"
+    catalog.write_text(json.dumps({"assets": [{
+        "asset_id": "crowd", "status": "approved", "kind": "fan_crowd_background",
+        "local_path": "assets/poster/fan-crowd/crowd.png", "source_url": "https://example.test/crowd",
+        "license_id": "CC-BY-4.0", "license_url": "https://creativecommons.org/licenses/by/4.0/",
+        "attribution": "Example photographer", "sha256": sha256_file(image),
+    }]}), encoding="utf-8")
+
+    asset = choose_fan_background(tmp_path, "fixture-1")
+    assert asset.local_path == image
+
+    image.write_bytes(b"changed")
+    with pytest.raises(RuntimeError, match="hash mismatch"):
+        choose_fan_background(tmp_path, "fixture-1")
+
+
+def test_star_faceoff_rejects_a_player_asset_without_current_verification(tmp_path):
+    portrait = tmp_path / "portrait.png"
+    Image.new("RGB", (32, 32), "red").save(portrait)
+    candidate = {
+        "player_name": "Example Player", "club": "Example FC", "source_url": "https://example.test/player",
+        "license_record": "operator-authorized", "local_path": str(portrait), "asset_hash": sha256_file(portrait),
+    }
+    assert verified_player_asset(candidate, "Example FC") is None
+    candidate["current_club_verified"] = True
+    candidate["season"] = "2026"
+    candidate["retrieval_date"] = "2026-10-25"
+    assert verified_player_asset(candidate, "Example FC").local_path == portrait
+
+
+def test_daily_asset_discovery_dry_run_writes_candidates_without_downloads(tmp_path):
+    phase1 = tmp_path / "run" / "phase1"
+    phase1.mkdir(parents=True)
+    phase1.joinpath("selected-fixtures.json").write_text(
+        json.dumps({"fixtures": [fixture(home_team="Santos", away_team="Internacional").to_dict()]}), encoding="utf-8"
+    )
+    result = discover_assets(tmp_path / "run", target_date="2026-09-06", dry_run=True)
+    manifest = json.loads(Path(result["output"]).read_text(encoding="utf-8"))
+    assert result["status"] == "CANDIDATES_REQUIRE_MANUAL_LICENSE_REVIEW"
+    assert manifest["selected_teams"] == ["Internacional", "Santos"]
+    assert all(row["firecrawl"]["status"] == "not_called_dry_run" for row in manifest["searches"])
 
 
 def test_static_delivery_copies_validated_png_without_a_video(tmp_path, monkeypatch):

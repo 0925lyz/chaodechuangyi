@@ -27,11 +27,12 @@
       "minItems": 2,
       "items": {
         "type": "object",
-        "required": ["player_name", "club", "season", "source_url", "license_record", "retrieval_date", "asset_hash", "local_path"],
+        "required": ["player_name", "club", "season", "current_club_verified", "source_url", "license_record", "retrieval_date", "asset_hash", "local_path"],
         "properties": {
           "player_name": {"type": "string"},
           "club": {"type": "string"},
           "season": {"type": "string"},
+          "current_club_verified": {"type": "boolean", "const": true},
           "source_url": {"type": "string", "format": "uri"},
           "license_record": {"type": "string", "minLength": 1},
           "retrieval_date": {"type": "string", "format": "date"},

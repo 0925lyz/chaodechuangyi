@@ -11,12 +11,14 @@ from typing import Any
 
 from PIL import Image
 
+from .assets import PosterAsset, choose_fan_background, verified_player_asset
+
 from .api_football import load_brasileirao_membership
 from .collector import FixtureCollectionError, collect_fixtures, load_fixture_file, resolve_target_date, save_collection, tomorrow_brasilia
 from .competition import membership_from_fixtures
 from .config import FactoryConfig
 from .image2 import generate_image2, save_image_route_manifest
-from .poster import compose_poster, prepare_background, resolve_fixture_crests
+from .poster import compose_faceoff_background, compose_poster, prepare_background, resolve_fixture_crests
 from .selection import recommend_fixtures
 
 
@@ -284,9 +286,22 @@ def run_phase3(config: FactoryConfig, run_dir: Path, *, dry_run: bool = False) -
         poster_path = phase_dir / "posters" / task["filename"]
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
         prompt_path.write_text(task["prompt"], encoding="utf-8")
+        asset_sources: list[dict[str, str]] = []
         if dry_run:
             _make_dry_poster(task, raw_path)
             route = [{"provider_id": "dry-run", "model_id": "none", "status": "not_called"}]
+        elif task["poster_style"] == "fan_crowd":
+            asset = choose_fan_background(ROOT, task["id"])
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(asset.local_path, raw_path)
+            route = [{"provider_id": "approved-asset-catalog", "model_id": "none", "status": "local-static-collage"}]
+            asset_sources.append(asset.manifest(ROOT))
+        elif task["poster_style"] == "star_faceoff" and not dry_run:
+            home_asset = task["style_evidence"]["home_asset"]
+            away_asset = task["style_evidence"]["away_asset"]
+            compose_faceoff_background(Path(home_asset["local_path"]), Path(away_asset["local_path"]), raw_path)
+            route = [{"provider_id": "licensed-player-assets", "model_id": "none", "status": "local-static-collage"}]
+            asset_sources.extend([home_asset, away_asset])
         else:
             attempts = generate_image2(task["prompt"], raw_path, config.data["image"])
             save_image_route_manifest(phase_dir / "image-routes" / f"{task['id']}.json", attempts)
@@ -314,6 +329,7 @@ def run_phase3(config: FactoryConfig, run_dir: Path, *, dry_run: bool = False) -
             "poster": str(poster_path),
             "compose": compose_meta,
             "image_route": route,
+            "source_assets": asset_sources,
         })
     manifest = {"ok": True, "status": "PHASE3_COMPLETE", "poster_count": len(items), "items": items}
     _write_json(phase_dir / "poster-manifest.json", manifest)
@@ -413,7 +429,7 @@ def _club_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.casefold())
 
 
-def _verified_faceoff_players(fixture: dict[str, Any], run_dir: Path) -> tuple[str | None, str | None]:
+def _verified_faceoff_players(fixture: dict[str, Any], run_dir: Path) -> tuple[PosterAsset | None, PosterAsset | None]:
     """Take one licensed, current player identity per club from the research record."""
     research_path = run_dir / "phase2" / f"{_task_id(fixture)}_research.json"
     if not research_path.is_file():
@@ -425,21 +441,33 @@ def _verified_faceoff_players(fixture: dict[str, Any], run_dir: Path) -> tuple[s
     if not isinstance(assets, list):
         return None, None
 
-    def player_for(team: str) -> str | None:
-        key = _club_key(team)
+    def player_for(team: str) -> PosterAsset | None:
         for asset in assets:
             if not isinstance(asset, dict):
                 continue
-            if _club_key(str(asset.get("club") or "")) != key:
-                continue
-            if not str(asset.get("license_record") or "").strip():
-                continue
-            name = str(asset.get("player_name") or "").strip()
-            if name:
-                return name
+            player = verified_player_asset(asset, team)
+            if player:
+                return player
         return None
 
     return player_for(str(fixture["home_team"])), player_for(str(fixture["away_team"]))
+
+
+def _declared_faceoff_player(fixture: dict[str, Any], run_dir: Path, team: str) -> str | None:
+    """Dry-run-only display name bridge; production always uses verified_player_asset."""
+    research_path = run_dir / "phase2" / f"{_task_id(fixture)}_research.json"
+    if not research_path.is_file():
+        return None
+    try:
+        assets = _read_json(research_path).get("poster_assets", [])
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    for asset in assets if isinstance(assets, list) else []:
+        if isinstance(asset, dict) and _club_key(str(asset.get("club") or "")) == _club_key(team):
+            name = str(asset.get("player_name") or "").strip()
+            if name:
+                return name
+    return None
 
 
 def _resolve_poster_style(
@@ -448,11 +476,11 @@ def _resolve_poster_style(
     requested = str(fixture.get("poster_style") or "auto")
     if requested not in {"auto", *POSTER_STYLES}:
         raise RuntimeError(f"Unsupported poster style for {_task_id(fixture)}: {requested}")
-    home_star, away_star = _verified_faceoff_players(fixture, run_dir)
-    eligible_for_faceoff = bool(home_star and away_star)
+    home_asset, away_asset = _verified_faceoff_players(fixture, run_dir)
+    eligible_for_faceoff = bool(home_asset and away_asset)
+    home_name = home_asset.asset_id if home_asset else _declared_faceoff_player(fixture, run_dir, str(fixture["home_team"]))
+    away_name = away_asset.asset_id if away_asset else _declared_faceoff_player(fixture, run_dir, str(fixture["away_team"]))
     if dry_run and requested == "star_faceoff":
-        home_star = home_star or "an anonymous home-team footballer"
-        away_star = away_star or "an anonymous away-team footballer"
         eligible_for_faceoff = True
     if requested == "star_faceoff" and not eligible_for_faceoff:
         raise RuntimeError(
@@ -465,8 +493,10 @@ def _resolve_poster_style(
     return style, {
         "requested_style": requested,
         "eligible_for_star_faceoff": eligible_for_faceoff,
-        "home_player": home_star if style == "star_faceoff" else None,
-        "away_player": away_star if style == "star_faceoff" else None,
+        "home_player": home_name or "an anonymous home-team footballer" if style == "star_faceoff" else None,
+        "away_player": away_name or "an anonymous away-team footballer" if style == "star_faceoff" else None,
+        "home_asset": home_asset.manifest(ROOT) if style == "star_faceoff" and home_asset else None,
+        "away_asset": away_asset.manifest(ROOT) if style == "star_faceoff" and away_asset else None,
     }
 
 

@@ -46,13 +46,23 @@ jaguartv-prematch select \
 
 `poster_styles` 可写 `fan_crowd`、`star_faceoff` 或 `auto`。`fan_crowd` 是以两队球迷、看台、旗帜和现场情绪为主；`star_faceoff` 是两队各一名已授权球星的正脸对峙。`auto` 会优先交替风格，但只有研究证据完整才会选择球星对峙。
 
-3. 生产静态海报：
+3. 每日发现新素材。此步骤使用 agent-reach/Exa 与 Firecrawl 搜索新的候选来源，但只记录候选，绝不自动下载或直接用于海报：
+
+```bash
+scripts/discover-poster-assets.sh runs/YYYYMMDD_batch1 YYYY-MM-DD
+```
+
+`FIRECRAWL_API_KEY` 未配置时，结果会明确标记 `not_configured`，Exa 的发现结果仍会保留在
+`runs/YYYYMMDD_batch1/asset-research/`。审核许可、来源和适用性后，才可把新图加进
+`assets/poster/catalog.json`。具体规则见 [daily-asset-discovery.md](docs/daily-asset-discovery.md)。
+
+4. 生产静态海报：
 
 ```bash
 scripts/task1_launcher.sh 1 --stage produce --date YYYYMMDD
 ```
 
-生产会依次核对研究证据、官方队徽、Image2 主/备路由，接着生成无文字背景，再把队徽、赛程、预测、频道图标和精确 JaguarTV Logo 拼成成品。最终 PNG 在 `deliveries/YYYYMMDD_batch1/`，完整记录在同名 `runs/` 目录。
+生产会依次核对研究证据、官方队徽和素材授权。`fan_crowd` 从经过哈希核验的本地球迷/看台图中选取底图；`star_faceoff` 只会把两队当前且授权的本地球员肖像左右拼接。随后把队徽、赛程、预测、频道图标和精确 JaguarTV Logo 拼成成品。最终 PNG 在 `deliveries/YYYYMMDD_batch1/`，完整记录在同名 `runs/` 目录。
 
 ## 本地演练
 

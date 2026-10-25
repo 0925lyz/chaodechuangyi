@@ -16,3 +16,23 @@ does not call TTS or another generation service for music or CTA voice.
 Player photographs, club crests, and current-season kits are intentionally not bulk-vendored into
 Git. They remain in the licensed `image2数据库`, and each production run must copy only validated
 assets into its ignored run directory while retaining source and license evidence.
+
+## Poster Background Assets
+
+`assets/poster/catalog.json` is the only production allowlist for static `fan_crowd` backgrounds.
+Each entry records the original source, license/authorization, attribution and SHA-256. The factory
+checks all four before copying a file into a production run.
+
+- `assets/poster/fan-crowd/jaguartv-stadium-crowd-20260821.png`: an operator-authorized JaguarTV
+  Image2 output copied from the pre-existing controlled `image2数据库` inventory. It is a generic
+  stadium-and-stands base with no third-party player identity or team crest. The catalog retains
+  its exact source path and hash.
+
+External searches are **not** an authorization. `assets-discover` records daily candidates under
+the ignored `runs/<date>_batchN/asset-research/` folder, using agent-reach/Exa and Firecrawl when
+configured. A person must verify the license and add an approved, hash-checked catalog record
+before any downloaded image can be used in a poster.
+
+`star_faceoff` deliberately has no public bulk library. Its two player portraits must be supplied
+for that selected fixture with the current club verification, original URL, license record, local
+file path and SHA-256 required by `schemas/research-record.schema.json`.

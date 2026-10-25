@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import FactoryConfig
+from .assets import discover_assets
 from .pipeline import (
     default_run_dir,
     run_manual_selection,
@@ -47,6 +48,13 @@ def parser() -> argparse.ArgumentParser:
     select.add_argument("--decisions", type=Path, help="JSON containing selected_fixture_ids and optional poster_styles")
     select.add_argument("--operator", default="")
     select.add_argument("--note", default="")
+
+    assets_discover = commands.add_parser(
+        "assets-discover", help="Discover daily image candidates; it never downloads or approves media"
+    )
+    assets_discover.add_argument("--run-dir", required=True, type=Path)
+    assets_discover.add_argument("--date", required=True)
+    assets_discover.add_argument("--dry-run", action="store_true")
 
     produce = commands.add_parser("produce", help="Research, generate, compose, QA and deliver static PNG posters")
     _add_production_options(produce)
@@ -100,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
                 operator=args.operator or str(decisions.get("operator") or ""),
                 note=args.note or str(decisions.get("note") or ""),
             )
+        elif args.command == "assets-discover":
+            result = discover_assets(args.run_dir, target_date=args.date, dry_run=args.dry_run)
         else:
             config = FactoryConfig.load(args.config)
             run_dir = args.run_dir or default_run_dir(args.date)
